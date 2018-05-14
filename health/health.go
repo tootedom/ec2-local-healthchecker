@@ -3,6 +3,8 @@ package health
 import (
 	"sync"
 	"time"
+
+	"github.com/tootedom/ec2-local-healthchecker/checks"
 )
 
 // A Registry is a collection of checks. Most applications will use the global
@@ -10,7 +12,7 @@ import (
 // separate registries to isolate themselves from other tests.
 type Registry struct {
 	mu               sync.RWMutex
-	registeredChecks map[string]Checker
+	registeredChecks map[string]checks.Checker
 }
 
 // NewRegistry creates a new registry. This isn't necessary for normal use of
@@ -18,7 +20,7 @@ type Registry struct {
 // own set of checks.
 func NewRegistry() *Registry {
 	return &Registry{
-		registeredChecks: make(map[string]Checker),
+		registeredChecks: make(map[string]checks.Checker),
 	}
 }
 
@@ -26,25 +28,9 @@ func NewRegistry() *Registry {
 // the registry used by the HTTP handler.
 var DefaultRegistry *Registry
 
-// Checker is the interface for a Health Checker
-type Checker interface {
-	// Check returns nil if the service is okay.
-	Check() error
-}
-
-// CheckFunc is a convenience type to create functions that implement
-// the Checker interface
-type CheckFunc func() error
-
-// Check Implements the Checker interface to allow for any func() error method
-// to be passed as a Checker
-func (cf CheckFunc) Check() error {
-	return cf()
-}
-
 // Updater implements a health check that is explicitly set.
 type Updater interface {
-	Checker
+	checks.Checker
 
 	// Update updates the current status of the health check.
 	Update(status error)
@@ -72,10 +58,12 @@ func (u *updater) Check() error {
 // This allows us to have a Checker that returns the Check() call immediately
 // not blocking on a potentially expensive check.
 type thresholdUpdater struct {
-	mu        sync.Mutex
-	status    error
-	threshold int
-	count     int
+	mu          sync.Mutex
+	status      error
+	threshold   int
+	count       int
+	gracePeriod time.Duration
+	created     time.Time
 }
 
 // Check implements the Checker interface
@@ -95,25 +83,28 @@ func (tu *thresholdUpdater) Check() error {
 func (tu *thresholdUpdater) Update(status error) {
 	tu.mu.Lock()
 	defer tu.mu.Unlock()
+	t := time.Now()
+	elapsed := t.Sub(tu.created)
+	if tu.gracePeriod < elapsed {
+		if status == nil {
+			tu.count = 0
+		} else if tu.count < tu.threshold {
+			tu.count++
+		}
 
-	if status == nil {
-		tu.count = 0
-	} else if tu.count < tu.threshold {
-		tu.count++
+		tu.status = status
 	}
-
-	tu.status = status
 }
 
 // NewThresholdStatusUpdater returns a new thresholdUpdater
-func NewThresholdStatusUpdater(t int) Updater {
-	return &thresholdUpdater{threshold: t}
+func NewThresholdStatusUpdater(t int, grace time.Duration) Updater {
+	return &thresholdUpdater{threshold: t, created: time.Now(), gracePeriod: grace}
 }
 
 // PeriodicThresholdChecker wraps an updater to provide a periodic checker that
 // uses a threshold before it changes status
-func PeriodicThresholdChecker(check Checker, period time.Duration, threshold int) Checker {
-	tu := NewThresholdStatusUpdater(threshold)
+func PeriodicThresholdChecker(check checks.Checker, period time.Duration, threshold int, grace time.Duration) checks.Checker {
+	tu := NewThresholdStatusUpdater(threshold, grace)
 	go func() {
 		t := time.NewTicker(period)
 		for {
@@ -147,7 +138,7 @@ func CheckStatus() map[string]string {
 }
 
 // Register associates the checker with the provided name.
-func (registry *Registry) Register(name string, check Checker) {
+func (registry *Registry) Register(name string, check checks.Checker) {
 	if registry == nil {
 		registry = DefaultRegistry
 	}

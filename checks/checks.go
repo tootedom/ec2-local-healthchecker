@@ -17,20 +17,32 @@ package checks
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/tootedom/ec2-local-healthchecker/health"
 )
+
+// Checker is the interface for a Health Checker
+type Checker interface {
+	// Check returns nil if the service is okay.
+	Check() error
+}
+
+// CheckFunc is a convenience type to create functions that implement
+// the Checker interface
+type CheckFunc func() error
+
+// Check Implements the Checker interface to allow for any func() error method
+// to be passed as a Checker
+func (cf CheckFunc) Check() error {
+	return cf()
+}
 
 // HTTPChecker does a GET request and verifies that the HTTP status code
 // returned matches statusCode.
-func HTTPChecker(r string, statusCode int, timeout time.Duration, headers http.Header) health.Checker {
-	return health.CheckFunc(func() error {
-		fmt.Println("checking: " + r)
+func HTTPChecker(r string, statusCode int, timeout time.Duration, headers http.Header) Checker {
+	return CheckFunc(func() error {
 		client := http.Client{
 			Timeout: timeout,
 		}
@@ -56,8 +68,8 @@ func HTTPChecker(r string, statusCode int, timeout time.Duration, headers http.H
 }
 
 // TCPChecker attempts to open a TCP connection.
-func TCPChecker(addr string, timeout time.Duration) health.Checker {
-	return health.CheckFunc(func() error {
+func TCPChecker(addr string, timeout time.Duration) Checker {
+	return CheckFunc(func() error {
 		conn, err := net.DialTimeout("tcp", addr, timeout)
 		if err != nil {
 			return errors.New("connection to " + addr + " failed")

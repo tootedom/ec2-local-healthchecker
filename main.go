@@ -10,9 +10,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
 	"github.com/robfig/cron"
 	"github.com/takama/daemon"
+	"github.com/tevino/abool"
 	"github.com/tootedom/ec2-local-healthchecker/checks"
 	"github.com/tootedom/ec2-local-healthchecker/config"
 	"github.com/tootedom/ec2-local-healthchecker/health"
@@ -20,8 +27,8 @@ import (
 
 const (
 	// name of the service
-	name        = "cron_job"
-	description = "Cron job service example"
+	name        = "ec2-local-healthchecker"
+	description = "ec2-local-healthchecker"
 )
 
 var stdlog, errlog *log.Logger
@@ -32,6 +39,18 @@ type Service struct {
 }
 
 func registerInstanceAsUnhealthy(asg autoscalingiface.AutoScalingAPI) {
+	if instanceIsHealthy.IsSet() {
+		input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceId)}
+		_, err := asg.SetInstanceHealth(&input)
+
+		if err != nil {
+			errlog.Printf("Unabled to set instance(%s) as Unhealthy: %v", instanceId, err)
+			errlog.Println()
+		} else {
+			errlog.Println("Marked Instance as Unhealthy")
+			instanceIsHealthy.UnSet()
+		}
+	}
 }
 
 func createHealthCheck(started time.Time, gracePeriod time.Duration) func() {
@@ -40,13 +59,13 @@ func createHealthCheck(started time.Time, gracePeriod time.Duration) func() {
 		elapsed := t.Sub(started)
 		if gracePeriod < elapsed {
 			// create a simple file (current time).txt
-			// f, err := os.Create(fmt.Sprintf("%s/%s.txt", os.TempDir(), time.Now().Format(time.RFC3339)))
-			fmt.Println("created file:" + time.Now().Format(time.RFC3339))
-			fmt.Println(defaultRegistry.CheckStatus())
 			if len(defaultRegistry.CheckStatus()) > 0 {
-				fmt.Println("failed")
-			} else {
-				fmt.Println("ok")
+				sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
+				if err == nil {
+					registerInstanceAsUnhealthy(autoscaling.New(sess, aws.NewConfig().WithRegion(region)))
+				} else {
+					errlog.Println("Unable to create a AWS Session", err)
+				}
 			}
 		}
 	}
@@ -84,23 +103,27 @@ func (service *Service) Manage(conf config.Config, command string) (string, erro
 	c.Start()
 	// Waiting for interrupt by system signal
 	killSignal := <-interrupt
-	stdlog.Println("Got signal:", killSignal)
+	stdlog.Printf("Signal Received(%v) to exit.  Shutting Down....", killSignal)
 	return "Service exited", nil
 }
 
+var region string
+var instanceId string
 var defaultRegistry *health.Registry
+var creds *credentials.Credentials
+var instanceIsHealthy *abool.AtomicBool
 
 func createChecks(conf config.Config) {
 	defaultRegistry = health.NewRegistry()
 	for checkName, check := range conf.Checks {
-		var checker health.Checker
+		var checker checks.Checker
 		if strings.ToLower(check.Type) == "tcp" {
 			checker = checks.TCPChecker(check.Endpoint, check.Timeout)
 		} else {
 			checker = checks.HTTPChecker(check.Endpoint, 200, check.Timeout, nil)
 		}
 
-		defaultRegistry.Register(checkName, health.PeriodicThresholdChecker(checker, check.Frequency, check.Threshold))
+		defaultRegistry.Register(checkName, health.PeriodicThresholdChecker(checker, check.Frequency, check.Threshold, conf.GracePeriod))
 	}
 }
 
@@ -110,11 +133,39 @@ func init() {
 }
 
 func main() {
-	checkfilePtr := flag.String("healthcheckfile", "/etc/sysconfig/healthchecks.yml", "The location of healthchecks yaml file")
+	instanceIsHealthy = abool.NewBool(true)
+
+	checkfilePtr := flag.String("healthcheckfile", "/etc/sysconfig/ec2-local-healthchecker.yml", "The location of healthchecks yaml file")
 	testConfigPtr := flag.Bool("testconfig", false, "test the healthcheck file is parseable")
 	commandPtr := flag.String("command", "", "The command to run")
 
+	instanceId = os.Getenv("INSTANCE_ID")
+	region = os.Getenv("AWS_REGION")
+
+	sess := session.Must(session.NewSession(&aws.Config{}))
+	svc := ec2metadata.New(sess)
+
+	if len(instanceId) == 0 || len(region) == 0 {
+		// Create a EC2Metadata client from just a session.
+		doc, err := svc.GetInstanceIdentityDocument()
+		if err == nil {
+			instanceId = doc.InstanceID
+			region = doc.Region
+		} else {
+			errlog.Println("Unable to obtain instance id and region", err)
+			os.Exit(1)
+		}
+	}
+
 	flag.Parse()
+
+	creds = credentials.NewChainCredentials(
+		[]credentials.Provider{
+			&credentials.EnvProvider{},
+			&ec2rolecreds.EC2RoleProvider{
+				Client: svc,
+			},
+		})
 
 	checkfile := *checkfilePtr
 
@@ -126,8 +177,8 @@ func main() {
 	}
 
 	if *testConfigPtr {
-		fmt.Println("Parsed Configuration:")
-		fmt.Println(conf.Checks)
+		stdlog.Println("Parsed Configuration:")
+		stdlog.Println(conf.Checks)
 		os.Exit(1)
 	}
 

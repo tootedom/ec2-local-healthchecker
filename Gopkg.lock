@@ -3,7 +3,7 @@
 
 [[projects]]
   name = "github.com/aws/aws-sdk-go"
-  packages = ["aws","aws/awserr","aws/awsutil","aws/client","aws/client/metadata","aws/credentials","aws/endpoints","aws/request","aws/signer/v4","internal/sdkio","internal/sdkrand","internal/shareddefaults","private/protocol","private/protocol/query","private/protocol/query/queryutil","private/protocol/rest","private/protocol/xml/xmlutil","service/autoscaling","service/autoscaling/autoscalingiface"]
+  packages = ["aws","aws/awserr","aws/awsutil","aws/client","aws/client/metadata","aws/corehandlers","aws/credentials","aws/credentials/ec2rolecreds","aws/credentials/endpointcreds","aws/credentials/stscreds","aws/defaults","aws/ec2metadata","aws/endpoints","aws/request","aws/session","aws/signer/v4","internal/sdkio","internal/sdkrand","internal/shareddefaults","private/protocol","private/protocol/query","private/protocol/query/queryutil","private/protocol/rest","private/protocol/xml/xmlutil","service/autoscaling","service/autoscaling/autoscalingiface","service/sts"]
   revision = "31a85efbe3bc741eb539d6310c8e66030b7c5cb7"
   version = "v1.13.47"
 
@@ -50,6 +50,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/tevino/abool"
+  packages = ["."]
+  revision = "9b9efcf221b50905aab9bbabd3daed56dc10f339"
+
+[[projects]]
+  branch = "master"
   name = "golang.org/x/sys"
   packages = ["windows","windows/registry","windows/svc","windows/svc/mgr"]
   revision = "d0faeb539838e250bd0a9db4182d48d4a1915181"
@@ -63,6 +69,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "c33fa4b9c56d1554059ac6164e3a87c69d750032dbcdf6b2228143123b2a23aa"
+  inputs-digest = "cac0ac957f60ee69870c81e1824433a07e52f91d0675ae0b247ebd6bf48cfa66"
   solver-name = "gps-cdcl"
   solver-version = 1
