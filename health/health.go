@@ -17,6 +17,7 @@
 package health
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -74,12 +75,11 @@ func (u *updater) Check() error {
 // This allows us to have a Checker that returns the Check() call immediately
 // not blocking on a potentially expensive check.
 type thresholdUpdater struct {
-	mu          sync.Mutex
-	status      error
-	threshold   int
-	count       int
-	gracePeriod time.Duration
-	created     time.Time
+	mu           sync.Mutex
+	status       error
+	threshold    int
+	failedCount  int
+	successCount int
 }
 
 // Check implements the Checker interface
@@ -87,8 +87,10 @@ func (tu *thresholdUpdater) Check() error {
 	tu.mu.Lock()
 	defer tu.mu.Unlock()
 
-	if tu.count >= tu.threshold {
+	if tu.failedCount >= tu.threshold {
 		return tu.status
+	} else if tu.successCount < tu.threshold {
+		return errors.New("Consecutive Success less than threshold")
 	}
 
 	return nil
@@ -99,28 +101,26 @@ func (tu *thresholdUpdater) Check() error {
 func (tu *thresholdUpdater) Update(status error) {
 	tu.mu.Lock()
 	defer tu.mu.Unlock()
-	t := time.Now()
-	elapsed := t.Sub(tu.created)
-	if tu.gracePeriod < elapsed {
-		if status == nil {
-			tu.count = 0
-		} else if tu.count < tu.threshold {
-			tu.count++
-		}
-
-		tu.status = status
+	if status == nil {
+		tu.successCount++
+		tu.failedCount = 0
+	} else if tu.failedCount < tu.threshold {
+		tu.successCount = 0
+		tu.failedCount++
 	}
+
+	tu.status = status
 }
 
 // NewThresholdStatusUpdater returns a new thresholdUpdater
-func NewThresholdStatusUpdater(t int, grace time.Duration) Updater {
-	return &thresholdUpdater{threshold: t, created: time.Now(), gracePeriod: grace}
+func NewThresholdStatusUpdater(t int) Updater {
+	return &thresholdUpdater{threshold: t}
 }
 
 // PeriodicThresholdChecker wraps an updater to provide a periodic checker that
 // uses a threshold before it changes status
-func PeriodicThresholdChecker(check checks.Checker, period time.Duration, threshold int, grace time.Duration) checks.Checker {
-	tu := NewThresholdStatusUpdater(threshold, grace)
+func PeriodicThresholdChecker(check checks.Checker, period time.Duration, threshold int) checks.Checker {
+	tu := NewThresholdStatusUpdater(threshold)
 	go func() {
 		t := time.NewTicker(period)
 		for {

@@ -32,7 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
+	"github.com/cloudfoundry/gosigar"
 	"github.com/robfig/cron"
 	"github.com/takama/daemon"
 	"github.com/tevino/abool"
@@ -54,34 +54,71 @@ type Service struct {
 	daemon.Daemon
 }
 
-func registerInstanceAsUnhealthy(asg autoscalingiface.AutoScalingAPI) {
+func registerInstanceAsUnhealthy() {
 	if instanceIsHealthy.IsSet() {
-		input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceId)}
-		_, err := asg.SetInstanceHealth(&input)
+		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
+		if err == nil {
+			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
+			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceId)}
+			_, err := asg.SetInstanceHealth(&input)
 
-		if err != nil {
-			errlog.Printf("Unabled to set instance(%s) as Unhealthy: %v", instanceId, err)
-			errlog.Println()
+			if err != nil {
+				errlog.Printf("Unable to set instance(%s) as Unhealthy: %v", instanceId, err)
+				errlog.Println()
+			} else {
+				errlog.Println("Marked Instance as Unhealthy")
+				instanceIsHealthy.UnSet()
+			}
 		} else {
-			errlog.Println("Marked Instance as Unhealthy")
-			instanceIsHealthy.UnSet()
+			errlog.Println("Unable to create a AWS Session", err)
+		}
+
+	}
+}
+
+func registerInstanceAsHealthy() {
+	if !instanceIsHealthy.IsSet() {
+		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
+		if err == nil {
+			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
+			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Healthy"), InstanceId: aws.String(instanceId)}
+			_, err := asg.SetInstanceHealth(&input)
+
+			if err != nil {
+				errlog.Printf("Unable to set instance(%s) as Healthy: %v", instanceId, err)
+				errlog.Println()
+			} else {
+				errlog.Println("Marked Instance as Healthy")
+				instanceIsHealthy.Set()
+			}
+		} else {
+			errlog.Println("Unable to create a AWS Session", err)
 		}
 	}
 }
 
-func createHealthCheck(started time.Time, gracePeriod time.Duration) func() {
+func checkChecks() {
+	if len(defaultRegistry.CheckStatus()) > 0 {
+		errlog.Println("Health check failure")
+		registerInstanceAsUnhealthy()
+	} else {
+		errlog.Println("Health check success")
+		registerInstanceAsHealthy()
+	}
+}
+
+func createHealthCheck(gracePeriod time.Duration) func() {
 	return func() {
-		t := time.Now()
-		elapsed := t.Sub(started)
-		if gracePeriod < elapsed {
-			// create a simple file (current time).txt
-			if len(defaultRegistry.CheckStatus()) > 0 {
-				sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
-				if err == nil {
-					registerInstanceAsUnhealthy(autoscaling.New(sess, aws.NewConfig().WithRegion(region)))
-				} else {
-					errlog.Println("Unable to create a AWS Session", err)
-				}
+		if gracePeriodOver.IsSet() {
+			checkChecks()
+		} else {
+			uptime := sigar.Uptime{}
+			uptime.Get()
+			uptimeInSeconds := uptime.Length
+
+			if gracePeriod.Seconds() < uptimeInSeconds {
+				gracePeriodOver.Set()
+				checkChecks()
 			}
 		}
 	}
@@ -104,7 +141,6 @@ func (service *Service) Manage(conf config.Config, command string) (string, erro
 		return service.Status()
 	}
 
-	startedCron := time.Now()
 	// Set up channel on which to send signal notifications.
 	// We must use a buffered channel or risk missing the signal
 	// if we're not ready to receive when the signal is sent.
@@ -115,7 +151,7 @@ func (service *Service) Manage(conf config.Config, command string) (string, erro
 	// Create a new cron manager
 	c := cron.New()
 	// Run makefile every min
-	c.AddFunc(fmt.Sprintf("@every %s", conf.Frequency), createHealthCheck(startedCron, conf.GracePeriod))
+	c.AddFunc(fmt.Sprintf("@every %s", conf.Frequency), createHealthCheck(conf.GracePeriod))
 	c.Start()
 	// Waiting for interrupt by system signal
 	killSignal := <-interrupt
@@ -128,6 +164,7 @@ var instanceId string
 var defaultRegistry *health.Registry
 var creds *credentials.Credentials
 var instanceIsHealthy *abool.AtomicBool
+var gracePeriodOver *abool.AtomicBool
 
 func createChecks(conf config.Config) {
 	defaultRegistry = health.NewRegistry()
@@ -139,7 +176,7 @@ func createChecks(conf config.Config) {
 			checker = checks.HTTPChecker(check.Endpoint, 200, check.Timeout, nil)
 		}
 
-		defaultRegistry.Register(checkName, health.PeriodicThresholdChecker(checker, check.Frequency, check.Threshold, conf.GracePeriod))
+		defaultRegistry.Register(checkName, health.PeriodicThresholdChecker(checker, check.Frequency, check.Threshold))
 	}
 }
 
@@ -150,6 +187,7 @@ func init() {
 
 func main() {
 	instanceIsHealthy = abool.NewBool(true)
+	gracePeriodOver = abool.NewBool(false)
 
 	checkfilePtr := flag.String("healthcheckfile", "/etc/sysconfig/ec2-local-healthchecker.yml", "The location of healthchecks yaml file")
 	testConfigPtr := flag.Bool("testconfig", false, "test the healthcheck file is parseable")
@@ -186,6 +224,14 @@ func main() {
 	checkfile := *checkfilePtr
 
 	conf, err := config.Load(checkfile)
+
+	uptime := sigar.Uptime{}
+	uptime.Get()
+	uptimeInSeconds := uptime.Length
+
+	if conf.GracePeriod.Seconds() < uptimeInSeconds {
+		gracePeriodOver.Set()
+	}
 
 	if err != nil {
 		errlog.Println("Error Parsing Configuration File: ", err)
