@@ -23,6 +23,31 @@ func TestUptimeCalculator(t *testing.T) {
 
 }
 
+func TestCalculateMaxCheckWaitTime(t *testing.T) {
+	conf := config.Config{
+		GracePeriod: 10 * time.Second,
+		Frequency:   2 * time.Second,
+		Checks: map[string]config.Check{
+			"http": config.Check{
+				Threshold: 2,
+				Endpoint:  "",
+				Timeout:   1 * time.Second,
+				Frequency: 10 * time.Second,
+				Type:      "http",
+			},
+			"tcp": config.Check{
+				Threshold: 4,
+				Endpoint:  "",
+				Timeout:   2 * time.Second,
+				Frequency: 2 * time.Second,
+				Type:      "http",
+			},
+		},
+	}
+
+	assert.True(t, CalculateMaxCheckWaitTime(conf.Checks) == 20)
+}
+
 func TestChecksAfterGrace(t *testing.T) {
 
 	// echoHandler, passes back form parameter p

@@ -114,7 +114,7 @@ func WaitForGracePeriod(gracePeriod time.Duration, uptime UptimeCalc) {
 		if int64(gracePeriod.Seconds()) < uptime() {
 			break
 		}
-		time.Sleep(5)
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -209,6 +209,17 @@ func CreateUpdateCalculationFunction(launchtime int64) UptimeCalc {
 	}
 }
 
+func CalculateMaxCheckWaitTime(checks map[string]config.Check) int {
+	maxTime := 0
+	for _, check := range checks {
+		seconds := int(check.Frequency.Seconds()) * int(check.Threshold)
+		if seconds > maxTime {
+			maxTime = seconds
+		}
+	}
+	return maxTime
+}
+
 func main() {
 	instanceIsHealthy = abool.NewBool(true)
 	gracePeriodOver = abool.NewBool(false)
@@ -266,8 +277,16 @@ func main() {
 	if runInForeground {
 		// Start the checks running
 		CreateChecks(*conf)
+		startTime := time.Now().Unix()
+		timeToWait := CalculateMaxCheckWaitTime(conf.Checks) + 1
 		// Do not check the result until grace is over
 		WaitForGracePeriod(conf.GracePeriod, uptimeCalculationFunction)
+		endTime := time.Now().Unix()
+		waited := endTime - startTime
+		extra := timeToWait - int(waited)
+		if extra > 0 {
+			time.Sleep(time.Duration(extra) * time.Second)
+		}
 
 		if len(defaultRegistry.CheckStatus()) > 0 {
 			os.Exit(1)
