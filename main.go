@@ -47,6 +47,8 @@ const (
 	description = "ec2-local-healthchecker"
 )
 
+type UptimeCalc func() int64
+
 var stdlog, errlog *log.Logger
 
 // Service is the daemon service struct
@@ -59,11 +61,11 @@ func registerInstanceAsUnhealthy() {
 		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
 		if err == nil {
 			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
-			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceId)}
+			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceID)}
 			_, err := asg.SetInstanceHealth(&input)
 
 			if err != nil {
-				errlog.Printf("Unable to set instance(%s) as Unhealthy: %v", instanceId, err)
+				errlog.Printf("Unable to set instance(%s) as Unhealthy: %v", instanceID, err)
 				errlog.Println()
 			} else {
 				errlog.Println("Marked Instance as Unhealthy")
@@ -81,11 +83,11 @@ func registerInstanceAsHealthy() {
 		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
 		if err == nil {
 			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
-			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Healthy"), InstanceId: aws.String(instanceId)}
+			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Healthy"), InstanceId: aws.String(instanceID)}
 			_, err := asg.SetInstanceHealth(&input)
 
 			if err != nil {
-				errlog.Printf("Unable to set instance(%s) as Healthy: %v", instanceId, err)
+				errlog.Printf("Unable to set instance(%s) as Healthy: %v", instanceID, err)
 				errlog.Println()
 			} else {
 				errlog.Println("Marked Instance as Healthy")
@@ -107,16 +109,21 @@ func checkChecks() {
 	}
 }
 
-func createHealthCheck(gracePeriod time.Duration) func() {
+func WaitForGracePeriod(gracePeriod time.Duration, uptime UptimeCalc) {
+	for {
+		if int64(gracePeriod.Seconds()) < uptime() {
+			break
+		}
+		time.Sleep(5)
+	}
+}
+
+func createHealthCheck(gracePeriod time.Duration, uptime UptimeCalc) func() {
 	return func() {
 		if gracePeriodOver.IsSet() {
 			checkChecks()
 		} else {
-			uptime := sigar.Uptime{}
-			uptime.Get()
-			uptimeInSeconds := uptime.Length
-
-			if gracePeriod.Seconds() < uptimeInSeconds {
+			if int64(gracePeriod.Seconds()) < uptime() {
 				gracePeriodOver.Set()
 				checkChecks()
 			}
@@ -125,7 +132,7 @@ func createHealthCheck(gracePeriod time.Duration) func() {
 }
 
 // Manage by daemon commands or run the daemon
-func (service *Service) Manage(conf config.Config, command string) (string, error) {
+func (service *Service) Manage(conf config.Config, command string, uptimeCalculationFunction UptimeCalc) (string, error) {
 
 	switch command {
 	case "install":
@@ -147,11 +154,11 @@ func (service *Service) Manage(conf config.Config, command string) (string, erro
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	createChecks(conf)
+	CreateChecks(conf)
 	// Create a new cron manager
 	c := cron.New()
 	// Run makefile every min
-	c.AddFunc(fmt.Sprintf("@every %s", conf.Frequency), createHealthCheck(conf.GracePeriod))
+	c.AddFunc(fmt.Sprintf("@every %s", conf.Frequency), createHealthCheck(conf.GracePeriod, uptimeCalculationFunction))
 	c.Start()
 	// Waiting for interrupt by system signal
 	killSignal := <-interrupt
@@ -160,13 +167,13 @@ func (service *Service) Manage(conf config.Config, command string) (string, erro
 }
 
 var region string
-var instanceId string
+var instanceID string
 var defaultRegistry *health.Registry
 var creds *credentials.Credentials
 var instanceIsHealthy *abool.AtomicBool
 var gracePeriodOver *abool.AtomicBool
 
-func createChecks(conf config.Config) {
+func CreateChecks(conf config.Config) {
 	defaultRegistry = health.NewRegistry()
 	for checkName, check := range conf.Checks {
 		var checker checks.Checker
@@ -185,33 +192,55 @@ func init() {
 	errlog = log.New(os.Stderr, "", log.Ldate|log.Ltime)
 }
 
+func CreateUpdateCalculationFunction(launchtime int64) UptimeCalc {
+	if launchtime < 0 {
+		return func() int64 {
+			uptime := sigar.Uptime{}
+			uptime.Get()
+			uptimeInSeconds := uptime.Length
+			return int64(uptimeInSeconds)
+		}
+	} else {
+		return func() int64 {
+			now := time.Now()
+			secs := now.Unix()
+			return secs - launchtime
+		}
+	}
+}
+
 func main() {
 	instanceIsHealthy = abool.NewBool(true)
 	gracePeriodOver = abool.NewBool(false)
 
 	checkfilePtr := flag.String("healthcheckfile", "/etc/sysconfig/ec2-local-healthchecker.yml", "The location of healthchecks yaml file")
 	testConfigPtr := flag.Bool("testconfig", false, "test the healthcheck file is parseable")
+	foregroundPtr := flag.Bool("foreground", false, "run the healthchecks in the foreground, exiting with nonzero if checks fail")
+	launchTime := flag.Int64("launchtime", -1, "The launch time of the server that is running")
 	commandPtr := flag.String("command", "", "The command to run")
 
-	instanceId = os.Getenv("INSTANCE_ID")
-	region = os.Getenv("AWS_REGION")
+	flag.Parse()
+	runInForeground := *foregroundPtr
+	uptimeCalculationFunction := CreateUpdateCalculationFunction(*launchTime)
+	checkfile := *checkfilePtr
+
+	instanceID := os.Getenv("INSTANCE_ID")
+	region := os.Getenv("AWS_REGION")
 
 	sess := session.Must(session.NewSession(&aws.Config{}))
 	svc := ec2metadata.New(sess)
 
-	if len(instanceId) == 0 || len(region) == 0 {
+	if len(instanceID) == 0 || len(region) == 0 {
 		// Create a EC2Metadata client from just a session.
 		doc, err := svc.GetInstanceIdentityDocument()
 		if err == nil {
-			instanceId = doc.InstanceID
+			instanceID = doc.InstanceID
 			region = doc.Region
 		} else {
 			errlog.Println("Unable to obtain instance id and region", err)
 			os.Exit(1)
 		}
 	}
-
-	flag.Parse()
 
 	creds = credentials.NewChainCredentials(
 		[]credentials.Provider{
@@ -221,17 +250,7 @@ func main() {
 			},
 		})
 
-	checkfile := *checkfilePtr
-
 	conf, err := config.Load(checkfile)
-
-	uptime := sigar.Uptime{}
-	uptime.Get()
-	uptimeInSeconds := uptime.Length
-
-	if conf.GracePeriod.Seconds() < uptimeInSeconds {
-		gracePeriodOver.Set()
-	}
 
 	if err != nil {
 		errlog.Println("Error Parsing Configuration File: ", err)
@@ -244,16 +263,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := daemon.New(name, description)
-	if err != nil {
-		errlog.Println("Error: ", err)
-		os.Exit(1)
+	if runInForeground {
+		// Start the checks running
+		CreateChecks(*conf)
+		// Do not check the result until grace is over
+		WaitForGracePeriod(conf.GracePeriod, uptimeCalculationFunction)
+
+		if len(defaultRegistry.CheckStatus()) > 0 {
+			os.Exit(1)
+		} else {
+			os.Exit(0)
+		}
+
+	} else {
+
+		srv, err := daemon.New(name, description)
+		if err != nil {
+			errlog.Println("Error: ", err)
+			os.Exit(1)
+		}
+		service := &Service{srv}
+		status, err := service.Manage(*conf, *commandPtr, uptimeCalculationFunction)
+		if err != nil {
+			errlog.Println(status, "\nError: ", err)
+			os.Exit(1)
+		}
+		fmt.Println(status)
 	}
-	service := &Service{srv}
-	status, err := service.Manage(*conf, *commandPtr)
-	if err != nil {
-		errlog.Println(status, "\nError: ", err)
-		os.Exit(1)
-	}
-	fmt.Println(status)
 }
