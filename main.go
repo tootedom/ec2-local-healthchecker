@@ -109,12 +109,15 @@ func checkChecks() {
 	}
 }
 
-func WaitForGracePeriod(gracePeriod time.Duration, uptime UptimeCalc) {
+func WaitForGracePeriod(gracePeriod time.Duration, uptime UptimeCalc, checkHealthy bool) bool {
 	for {
 		if int64(gracePeriod.Seconds()) < uptime() {
-			break
+			return false
 		}
 		time.Sleep(5 * time.Second)
+		if checkHealthy && len(defaultRegistry.CheckStatus()) == 0 {
+			return true
+		}
 	}
 }
 
@@ -227,11 +230,13 @@ func main() {
 	checkfilePtr := flag.String("healthcheckfile", "/etc/sysconfig/ec2-local-healthchecker.yml", "The location of healthchecks yaml file")
 	testConfigPtr := flag.Bool("testconfig", false, "test the healthcheck file is parseable")
 	foregroundPtr := flag.Bool("foreground", false, "run the healthchecks in the foreground, exiting with nonzero if checks fail")
+	exitForegroundIfHealthlyPtr := flag.Bool("fg-exit-early-if-healthy", false, "When running in the foreground can exit early before graceperiod is over if health checks are ok")
 	launchTime := flag.Int64("launchtime", -1, "The launch time of the server that is running")
 	commandPtr := flag.String("command", "", "The command to run")
 
 	flag.Parse()
 	runInForeground := *foregroundPtr
+	exitEarlyForHealthyStatus := *exitForegroundIfHealthlyPtr
 	uptimeCalculationFunction := CreateUpdateCalculationFunction(*launchTime)
 	checkfile := *checkfilePtr
 
@@ -280,7 +285,10 @@ func main() {
 		startTime := time.Now().Unix()
 		timeToWait := CalculateMaxCheckWaitTime(conf.Checks) + 1
 		// Do not check the result until grace is over
-		WaitForGracePeriod(conf.GracePeriod, uptimeCalculationFunction)
+		healthy := WaitForGracePeriod(conf.GracePeriod, uptimeCalculationFunction, exitEarlyForHealthyStatus)
+		if healthy {
+			os.Exit(0)
+		}
 		endTime := time.Now().Unix()
 		waited := endTime - startTime
 		extra := timeToWait - int(waited)
