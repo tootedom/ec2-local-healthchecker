@@ -14,7 +14,7 @@ import (
 // This tests GET request with passing in a parameter.
 func TestUptimeCalculator(t *testing.T) {
 
-	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix())
+	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix(), 10*time.Second)
 	start := time.Now().Unix()
 	WaitForGracePeriod(10*time.Second, calcFunc, false)
 	end := time.Now().Unix()
@@ -73,7 +73,7 @@ func TestChecksAfterGrace(t *testing.T) {
 		},
 	})
 
-	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix())
+	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix(), 10*time.Second)
 	start := time.Now().Unix()
 	WaitForGracePeriod(10*time.Second, calcFunc, false)
 	end := time.Now().Unix()
@@ -111,9 +111,48 @@ func TestChecksDuringGraceAndExitsEarlyIfHealthy(t *testing.T) {
 		},
 	})
 
-	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix())
+	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix(), 10*time.Second)
 	start := time.Now().Unix()
 	healthy := WaitForGracePeriod(10*time.Second, calcFunc, true)
+	end := time.Now().Unix()
+	diff := end - start
+	assert.True(t, diff <= 10)
+
+	fmt.Println(len(defaultRegistry.CheckStatus()))
+	assert.True(t, healthy)
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 0)
+
+}
+
+func TestChecksDuringGraceAndExitsEarlyIfHealthyAndPriorCurrentEpoch(t *testing.T) {
+
+	// echoHandler, passes back form parameter p
+	helloHandler := func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "hello")
+	}
+
+	// create test server with handler
+	ts := httptest.NewServer(http.HandlerFunc(helloHandler))
+	defer ts.Close()
+
+	CreateChecks(config.Config{
+		GracePeriod: 10 * time.Second,
+		Frequency:   2 * time.Second,
+		Checks: map[string]config.Check{
+			"http": config.Check{
+				Threshold: 2,
+				Endpoint:  ts.URL,
+				Timeout:   1 * time.Second,
+				Frequency: 2 * time.Second,
+				Type:      "http",
+			},
+		},
+	})
+
+	calcFunc := CreateUpdateCalculationFunction(time.Now().Unix()-1000, 10*time.Second)
+	start := time.Now().Unix()
+	healthy := WaitForGracePeriod(10*time.Second, calcFunc, true)
+	fmt.Println(healthy)
 	end := time.Now().Unix()
 	diff := end - start
 	assert.True(t, diff <= 10)

@@ -195,7 +195,9 @@ func init() {
 	errlog = log.New(os.Stderr, "", log.Ldate|log.Ltime)
 }
 
-func CreateUpdateCalculationFunction(launchtime int64) UptimeCalc {
+func CreateUpdateCalculationFunction(launchtime int64, gracePeriod time.Duration) UptimeCalc {
+	curr := time.Now().Unix()
+
 	if launchtime < 0 {
 		return func() int64 {
 			uptime := sigar.Uptime{}
@@ -203,13 +205,15 @@ func CreateUpdateCalculationFunction(launchtime int64) UptimeCalc {
 			uptimeInSeconds := uptime.Length
 			return int64(uptimeInSeconds)
 		}
-	} else {
-		return func() int64 {
-			now := time.Now()
-			secs := now.Unix()
-			return secs - launchtime
-		}
+	} else if (launchtime + int64(gracePeriod.Seconds())) <= curr {
+		launchtime = time.Now().Unix()
 	}
+
+	return func() int64 {
+		secs := time.Now().Unix()
+		return secs - launchtime
+	}
+
 }
 
 func CalculateMaxCheckWaitTime(checks map[string]config.Check) int {
@@ -237,7 +241,6 @@ func main() {
 	flag.Parse()
 	runInForeground := *foregroundPtr
 	exitEarlyForHealthyStatus := *exitForegroundIfHealthlyPtr
-	uptimeCalculationFunction := CreateUpdateCalculationFunction(*launchTime)
 	checkfile := *checkfilePtr
 
 	instanceID := os.Getenv("INSTANCE_ID")
@@ -278,6 +281,8 @@ func main() {
 		stdlog.Println(conf.Checks)
 		os.Exit(1)
 	}
+
+	uptimeCalculationFunction := CreateUpdateCalculationFunction(*launchTime, conf.GracePeriod)
 
 	if runInForeground {
 		// Start the checks running
