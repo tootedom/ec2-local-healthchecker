@@ -87,7 +87,10 @@ func (tu *thresholdUpdater) Check() error {
 	tu.mu.Lock()
 	defer tu.mu.Unlock()
 
-	if tu.failedCount >= tu.threshold {
+	// todo if both less than return nil
+	if tu.failedCount < tu.threshold && tu.successCount < tu.threshold {
+		return nil
+	} else if tu.failedCount >= tu.threshold {
 		return tu.status
 	} else if tu.successCount < tu.threshold {
 		return errors.New("Consecutive Success less than threshold")

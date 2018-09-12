@@ -162,3 +162,35 @@ func TestChecksDuringGraceAndExitsEarlyIfHealthyAndPriorCurrentEpoch(t *testing.
 	assert.True(t, len(defaultRegistry.CheckStatus()) == 0)
 
 }
+
+func TestChecksHealthBeforeGracePeriod(t *testing.T) {
+
+	// echoHandler, passes back form parameter p
+	helloHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}
+
+	// create test server with handler
+	ts := httptest.NewServer(http.HandlerFunc(helloHandler))
+	defer ts.Close()
+
+	CreateChecks(config.Config{
+		GracePeriod: 10 * time.Second,
+		Frequency:   2 * time.Second,
+		Checks: map[string]config.Check{
+			"http": config.Check{
+				Threshold: 5,
+				Endpoint:  ts.URL,
+				Timeout:   1 * time.Second,
+				Frequency: 2 * time.Second,
+				Type:      "http",
+			},
+		},
+	})
+
+	fmt.Println(len(defaultRegistry.CheckStatus()))
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 0)
+
+	time.Sleep(15 * time.Second)
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 1)
+}

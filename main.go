@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,6 +48,12 @@ const (
 	description = "ec2-local-healthchecker"
 )
 
+type EnvData struct {
+	region     string
+	instanceId string
+	creds      *credentials.Credentials
+}
+
 type UptimeCalc func() int64
 
 var stdlog, errlog *log.Logger
@@ -57,10 +64,14 @@ type Service struct {
 }
 
 func registerInstanceAsUnhealthy() {
+	env := globalEnvData.Load().(EnvData)
+	regionName := env.region
+	instanceID := env.instanceId
+	creds := env.creds
 	if instanceIsHealthy.IsSet() {
-		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
+		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(regionName)})
 		if err == nil {
-			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
+			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(regionName))
 			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Unhealthy"), InstanceId: aws.String(instanceID)}
 			_, err := asg.SetInstanceHealth(&input)
 
@@ -79,10 +90,15 @@ func registerInstanceAsUnhealthy() {
 }
 
 func registerInstanceAsHealthy() {
+	env := globalEnvData.Load().(EnvData)
+	regionName := env.region
+	instanceID := env.instanceId
+	creds := env.creds
+
 	if !instanceIsHealthy.IsSet() {
-		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(region)})
+		sess, err := session.NewSession(&aws.Config{Credentials: creds, Region: aws.String(regionName)})
 		if err == nil {
-			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(region))
+			asg := autoscaling.New(sess, aws.NewConfig().WithRegion(regionName))
 			input := autoscaling.SetInstanceHealthInput{HealthStatus: aws.String("Healthy"), InstanceId: aws.String(instanceID)}
 			_, err := asg.SetInstanceHealth(&input)
 
@@ -169,10 +185,9 @@ func (service *Service) Manage(conf config.Config, command string, uptimeCalcula
 	return "Service exited", nil
 }
 
-var region string
-var instanceID string
+var globalEnvData atomic.Value
+
 var defaultRegistry *health.Registry
-var creds *credentials.Credentials
 var instanceIsHealthy *abool.AtomicBool
 var gracePeriodOver *abool.AtomicBool
 
@@ -243,12 +258,11 @@ func main() {
 	exitEarlyForHealthyStatus := *exitForegroundIfHealthlyPtr
 	checkfile := *checkfilePtr
 
-	instanceID := os.Getenv("INSTANCE_ID")
-	region := os.Getenv("AWS_REGION")
-
 	sess := session.Must(session.NewSession(&aws.Config{}))
 	svc := ec2metadata.New(sess)
 
+	instanceID := os.Getenv("INSTANCE_ID")
+	region := os.Getenv("AWS_REGION")
 	if len(instanceID) == 0 || len(region) == 0 {
 		// Create a EC2Metadata client from just a session.
 		doc, err := svc.GetInstanceIdentityDocument()
@@ -261,13 +275,17 @@ func main() {
 		}
 	}
 
-	creds = credentials.NewChainCredentials(
+	creds := credentials.NewChainCredentials(
 		[]credentials.Provider{
 			&credentials.EnvProvider{},
 			&ec2rolecreds.EC2RoleProvider{
 				Client: svc,
 			},
 		})
+
+	env := EnvData{region: region, instanceId: instanceID, creds: creds}
+
+	globalEnvData.Store(env)
 
 	conf, err := config.Load(checkfile)
 
