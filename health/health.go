@@ -80,16 +80,20 @@ type thresholdUpdater struct {
 	threshold    int
 	failedCount  int
 	successCount int
+	isError      bool
 }
 
 // Check implements the Checker interface
 func (tu *thresholdUpdater) Check() error {
 	tu.mu.Lock()
 	defer tu.mu.Unlock()
-
 	// todo if both less than return nil
 	if tu.failedCount < tu.threshold && tu.successCount < tu.threshold {
-		return nil
+		if tu.isError {
+			return errors.New("Previous Ill, and not yet Healthy")
+		} else {
+			return nil
+		}
 	} else if tu.failedCount >= tu.threshold {
 		return tu.status
 	} else if tu.successCount < tu.threshold {
@@ -106,10 +110,18 @@ func (tu *thresholdUpdater) Update(status error) {
 	defer tu.mu.Unlock()
 	if status == nil {
 		tu.successCount++
+		if tu.successCount >= tu.threshold {
+			tu.isError = false
+		}
 		tu.failedCount = 0
-	} else if tu.failedCount < tu.threshold {
+	} else {
+		if tu.failedCount < tu.threshold {
+			tu.failedCount++
+		}
+		if tu.failedCount >= tu.threshold {
+			tu.isError = true
+		}
 		tu.successCount = 0
-		tu.failedCount++
 	}
 
 	tu.status = status

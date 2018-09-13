@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,4 +194,49 @@ func TestChecksHealthBeforeGracePeriod(t *testing.T) {
 
 	time.Sleep(15 * time.Second)
 	assert.True(t, len(defaultRegistry.CheckStatus()) == 1)
+}
+
+func TestChecksHealthAfterFailure(t *testing.T) {
+
+	var ops uint64
+
+	// echoHandler, passes back form parameter p
+	helloHandler := func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddUint64(&ops, 1)
+		if ops < 10 {
+			w.WriteHeader(500)
+			fmt.Println("Returning 404")
+		} else {
+			fmt.Println("Returning 200")
+			w.WriteHeader(200)
+		}
+	}
+
+	// create test server with handler
+	ts := httptest.NewServer(http.HandlerFunc(helloHandler))
+	defer ts.Close()
+
+	CreateChecks(config.Config{
+		GracePeriod: 1 * time.Second,
+		Frequency:   2 * time.Second,
+		Checks: map[string]config.Check{
+			"http": config.Check{
+				Threshold: 5,
+				Endpoint:  ts.URL,
+				Timeout:   1 * time.Second,
+				Frequency: 1 * time.Second,
+				Type:      "http",
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Second)
+	fmt.Println(len(defaultRegistry.CheckStatus()))
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 1)
+
+	time.Sleep(2 * time.Second)
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 1)
+
+	time.Sleep(5 * time.Second)
+	assert.True(t, len(defaultRegistry.CheckStatus()) == 0)
 }
